@@ -1,0 +1,440 @@
+---
+title: "Titanic Data Report : from Data Exploatory to Analysis"
+author: "100"
+date: "2019년 1월 21일"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_depth : 3
+    toc_float : true
+    number_sections: true
+    code_folding: show
+    fig_height: 4
+    fig_width: 7
+---
+#Library
+
+```{r lib,warning=FALSE,message=FALSE}
+library(dplyr) # bind_rows 함수 사용
+library(Amelia) # missmap
+library(ggplot2) #시각화
+library(gridExtra) # 시각화
+library(mice) #Age 결측치 처리
+library(ggmosaic) #mosaic plot
+library(knitr) #table
+library(kableExtra) #table
+library(stringr) #String Match
+```
+
+#데이터 확인
+
+```{r echo=FALSE}
+trainDat<-read.csv('./input/train.csv',stringsAsFactors = FALSE,na.strings = c("","NA"))
+testDat<-read.csv('./input/test.csv',stringsAsFactors = FALSE,na.strings = c("","NA"))
+subDat<-read.csv('./input/gender_submission.csv',stringsAsFactors = FALSE,na.strings = c("","NA"))
+```
+
+##데이터 정보 
+
+```{r checkData,echo=FALSE, message=FALSE, warning=FALSE}
+txt<-data.frame(
+  vars<-c('PassengerId','Survived','Pclass','Name','Sex','Age','Sibsp','Parch','Tichet','Fare','Cabin','Embarked'),
+  
+  figure<-c('int','int','int','char','char','int','int','int','int','int','char','char'),
+  
+  desc<-c('승객번호','1: 생존, 0: 사망','사회적, 경제적 지위 지표 ; A proxy for socio-economic status (SES)','이름','성별','나이','같이 탑승한 형제자매/부인 수','같이 탑승한 자녀/부모 수','티켓번호','승선요금','화물 번호','승선지(C = Cherbourg, Q = Queenstown, S = Southampton)')
+)
+colnames(txt)<-c('변수','형식','설명')
+kable(txt) %>%
+  kable_styling('striped',position='left',full_width = F)
+
+```
+
+##열 별 결측치 확인
+
+먼저 train data 와 test data 를 합친다.
+
+```{r bindrow,warning=FALSE,message='hide'}
+dat<-bind_rows(trainDat,testDat) # trainDat: 1~891, testDat:892~1309
+```
+
+```{r checkNAs, message='hide'}
+sort(round(colMeans(is.na(dat)),3),decreasing = TRUE)
+missmap(dat) # library(Amelia)
+```
+
+Fare 와 Embarked 의 결측치 행을 찾아본다.
+
+```{r findNAFare}
+which(is.na(dat$Fare)==TRUE)
+which(is.na(dat$Embarked)==TRUE)
+```
+
+결측치 검사 결과
++ 1 **AGE** 변수의 **20%가** 결측치다. 데이터 전처리 과정에서 적절한 값으로 채워넣어야 한다.
+
++ 2 **FARE** 변수의 **0.1%가** 결측치인 것으로 나왔다. **1044번 행의 Fare 값이 비어있다.** 이는 test data(892번부터 1309번까지)에 해당하는 행으로, 적절한 값으로 채워 넣어야 한다.  
+
++ 3 **Embarked** 변수의 **0.2%** 가 결측치다. **62번, 830번**행이 비어 있다. train data에 해당하는 행으로 비워두어도 무관하나 함께 적절한 항으로 채워 넣기로 한다.
+
++ 4 **Cabin**의 **77%**가 결측치다. 결측치가 너무 많기에 열을 삭제하는 것이 더 좋다고 판단된다.  
+
+#데이터 전처리(결측치 처리)
+
+결측치를 처리하기 전에, 유형화가 된 열들은 factor로 변환한다. 
+
+ggplot2를 활용해 *그룹*별로 색깔을 표현하기 위해서는 *그룹*에 해당하는 열을 factor로 바꿔야 한다. 
+
+factor로 바꿀 열은 **Survived, Pclass, Sex, Embarked** 다.  
+
+(*apply 계열 함수를 사용하려면 lapply 를 써야한다. data frame 은 list 이기에 vector 를 반환하는 sapply 를 쓰면 안된다. list 를 반환하는 lapply 를 써야 정상 작동한다.*)
+
+```{r asFactor}
+factorCols<-which(colnames(dat) %in% c('Survived','Pclass','Sex','Embarked'))
+dat[,factorCols]<-lapply(dat[,factorCols],as.factor) 
+```
+
+##Cabin
+
+Cabin 열은 결측치가 77% 이므로 삭제한다.
+
+```{r DelCabin}
+dat<-dat[,-which(colnames(dat)=='Cabin')]
+```
+## Fare
+
+앞서 확인했듯이 1044 행의 Fare 데이터가 비어있다. 
+
+티켓 번호에 요금 정보가 들어 있을 수 도 있고, 탑승객의 나이(Age), 사회, 경제적 지표(Pclass), 승선지(Embarked)와도 관련있을 것 같다. 
+
+### Fare ~ Age
+
+먼저 나이에 따른 요금 분포를 산점도로 확인해본다. 
+
+Age 와 Fare 모두 연속형 변수이므로, 두 변수 사이의 상관계수도 확인한다.
+
+```{r fareAge, warning=FALSE,message=FALSE}
+ggplot(data=dat, aes(x=Age,y=Fare))+
+  geom_point()
+labs(title = 'Fare~Age', x='Age', y = 'Fare')
+cor(dat$Age,dat$Fare,use='complete.obs') # 상관계수
+```
+  
+눈으로 보기에는 산점도에서는 뚜렷한 패턴이 없다. 
+
+상관계수는 0.17로 나이와 요금은 별 상관이 없어 보인다.
+
+### Fare ~ Pclass
+
+상자그림(Box plot)을 활용한다.  
+```{r FarePclass,warning=FALSE,message=FALSE}
+ggplot(data=dat, aes(x=Pclass,y=Fare,fill=Pclass))+
+  geom_boxplot()+
+  coord_cartesian(ylim = c(0, 250))+
+  labs(title ='Fare for Pclass')
+tapply(dat$Fare,dat$Pclass, summary)
+```  
+  
+Pclass 1은 대체적으로 Fare 가 높은 것으로 보인다. 
+
+Pclass 2와 3은 뚜렷한 차이가 없다. Pclass 별 Fare 의 평균과 중위값을 고려했을 때, **대체적으로 Pclass 가 높을 수록(1에 가까울 수록) 많은 요금을 지불했다고 볼 수 있다.** 
+
+### Fare ~ Embarked
+승선지(Embarked)와 Fare 의 관계도 상자그림(Box plot)으로 살펴본다.  
+```{r FareEmbarked,warning=FALSE,message=FALSE}
+ggplot(data = dat[is.na(dat$Embarked)==FALSE,], aes(x=Embarked,y=Fare, fill=Embarked))+
+  geom_boxplot()+
+  coord_cartesian(ylim=c(0,250))+
+  labs(title = 'Fare for Embarked')
+tapply(dat$Fare,dat$Embarked,summary)
+
+```  
+  
+Cherbourg 에서 배에 탄 사람들의 요금이 가장 높은 것으로 보이나, Cherbourg와 Southampton의 요금차이가 있다고 보기에는 애매하다. 
+
+Queenstown에서 배에 타 사람들의 요금은 대체적으로 낮다.  
+
+### 결측치 채우기
+
+1044번 승객의 나이(Age)는 60.5, 사회-경제적 수준 지표(Pclass)는 3, 승선지(Embarked)는 S(Southampton) 이다.
+
+```{r 1044row}
+dat[1044,]
+
+```
+  
+앞서 요금은 Pclass 와 Embarked 에 따라 차이가 난다는 사실을 확인했다. 
+
+Pclass 가 3 이고, Embarked 가 S 인 사람들의 Fare 분포를 살펴보자.
+
+```{r P3ES, warning=FALSE,message=FALSE}
+ggplot(dat[which((dat$Pclass=='3')&(dat$Embarked=='S')),], aes(x= Fare))+
+  geom_density(fill='white',alpha=.7)+
+  geom_vline(aes(xintercept = median(Fare,na.rm = TRUE)), color ='red', linetype = 'dashed',lwd=1)+
+  labs(title='Distribution for Fare')
+```
+
+위 분포의 중위값으로 결측치를 대체한다.
+  
+```{r inputFare}
+val<-median(dat[which((dat$Pclass=='3')&(dat$Embarked=='S')),]$Fare,na.rm=TRUE)
+dat[1044,]$Fare<-val
+dat[1044,]
+mean(is.na(dat$Fare))
+```
+
+##Embarked
+
+62번, 830번 행의 Embarked가 비어있다. 
+
+앞서 Fare 가 Embarked 와 관련있는 것으로 확인했다. 
+
+Pclass 또한 관련있을 것 같다. 
+
+62번, 830번 행의 Pclass 와 Fare 는 모두 1,80 이다. 
+  
+```{r PclassEmbarked}
+dat[c(62,830),]
+
+```
+
+Embarked 와 Pclass 에 따른 Fare 의 상자그림을 살펴보자.
+
+```{r FareEmbarked+Fare}
+ggplot(dat, aes(x = Embarked, y = Fare, fill = Pclass)) +
+  geom_boxplot() +
+  geom_hline(aes(yintercept=80), 
+    colour='red', linetype='dashed', lwd=1) +
+  labs(title='Fare~Embarked+Fare')
+```
+
+Pclass 가 1이고 Fare 가 80인사람은 Embarked 가 C 인 것을 알 수 있다. 
+
+결측치를 채워준다.
+
+```{r inputEmbarked}
+dat[c(62,830),]$Embarked = 'C'
+mean(is.na(dat$Embarked))
+
+```
+
+##Age
+
+Age 의 분포를 히스토그램으로 확인해본다.
+  
+```{r AgeHistogram,warning=FALSE,message=FALSE}
+#library(ggplot2)
+range(dat$Age,na.rm=TRUE) # min 0.17 max 80
+ageHist<-ggplot(data=dat, aes(x=Age))+
+  geom_histogram(breaks = seq(0,80,2),
+                 fill='white',
+                 col='black',
+                 alpha = .7)+
+  geom_vline(data=dat, aes(xintercept =mean(Age,na.rm= TRUE)), 
+             color = 'red', size = 1, linetype ='dashed')+
+  geom_text(aes(x=mean(Age,na.rm= TRUE),y = 80, label = 'Mean ~= 29'))
+ageHist
+labs(title = 'Histogram for Age', x='Age', y = 'Count')
+#na.rm : 결측치를 제외하고 평균 산출
+```
+  
+탑승자 평균 나이는 29살, 15살부터 35살 사이의 탑승객이 가장 많은 것으로 보인다. 
+
+결측치를 채우고 나서 전체 나이의 분포가 앞서 확인한 그래프와 비슷해야 한다.   
+
+mice package 를 활용해 Age의 결측치를 예측해 채워 넣기로 한다. 
+
+나이는 Pclass,Fare,Embarked 변수를 사용해 추측한다.
+
+```{r agemice, message=FALSE, warning= FALSE, results=}
+miceMode<-mice(dat[, names(dat) %in% c('Age','Pclass','Fare','Embarked')], method='rf')
+miceMode<-complete(miceMode)
+```
+
+원래 Age 의 분포와 비교해본다.
+
+```{r agePlot, message =FALSE, warning = FALSE}
+miceHist<-ggplot(miceMode,aes(x=Age))+
+  geom_histogram(breaks=seq(0,80,2),
+                 fill ='skyblue',
+                 alpha =.5,
+                 col='black')+
+  geom_text(aes(x=mean(Age,na.rm= TRUE),y = 80, label = 'Mean'))+
+  geom_vline(data=miceMode, aes(xintercept =mean(Age,na.rm= TRUE)), 
+             color = 'red', size = 2, linetype ='dashed')+
+  labs(title = 'Histogram for MICE output', x='Age', y = 'Count')
+
+ageHist<-ggplot(data=dat, aes(x=Age))+
+  geom_histogram(breaks = seq(0,80,2),
+                 fill='magenta',
+                 alpha = .1,
+                 col='black')+
+  geom_vline(data=dat, aes(xintercept =mean(Age,na.rm= TRUE)), 
+             color = 'red', size = 2, linetype ='dashed')+
+  geom_text(aes(x=mean(Age,na.rm= TRUE),y = 80, label = 'Mean'))+
+  labs(title = 'Histogram for Age', x='Age', y = 'Count')
+
+grid.arrange(miceHist,ageHist)
+```
+
+분포가 비슷한 것을 확인했으니 Age 열을 mice 의 결과값으로 대체한다.
+
+```{r replaceAge, message=FALSE, warning=FALSE}
+dat$Age<-miceMode$Age
+sum(is.na(dat$age))
+```
+
+#데이터 탐색적 분석
+
+각 열이 생존 여부와 얼마나 상관있는지 확인하기 위해 Survive에 대한 각 열 데이터의 분포를 확인한다.
+
+##Age, Sex
+
+성별과 생존여부에 따른 나이대 분포를 살펴본다.
+
+```{r SurvivedAgeSex, message=FALSE}
+maleCol<-which(dat[1:891,]$Sex =='male')
+femaleCol<-which(dat[1:891,]$Sex =='female')
+pMale<-ggplot(dat[1:891,][maleCol,],aes(x=Age, fill = Survived))+
+  geom_histogram(breaks=seq(0,80,2),
+                 alpha=.5,
+                 col='black')+
+  labs(title = 'Survived for Age(male)')
+pFemale<-ggplot(dat[1:891,][femaleCol,],aes(x=Age, fill = Survived))+
+  geom_histogram(breaks=seq(0,80,2),
+                 alpha=.5,
+                 col='black')+
+  labs(title = 'Survived for Age(female)')
+grid.arrange(pMale,pFemale,nrow=2)
+```
+
+남성의 경우 0~14세(어린이)를 제외하고 생존률이 매우 낮았다. 
+
+여성은 특정 구간을 제외하면 생존률이 높다. 
+
+```{r SurvivedAge, message=FALSE}
+ggplot(dat[1:891,],aes(x=Age, fill = Survived))+
+  geom_histogram(breaks=seq(0,80,1),
+                 col = 'black')
+```
+
+승객 전체를 대상으로 비교해봐도 0~14세 사이의 승객 생존률이 비교적 높다.
+
+당시 승객들은 '여자와 어린이 먼저'라는 슬로건에 따라 구조작전을 펼친 모양새다.
+
+###FARE
+```{r FARESurvived, message=FALSE}
+ggplot(dat[1:891,],aes(x=Fare,fill=Survived))+
+  geom_histogram(bins = 100,col='black')+
+  labs(title='Survived for Fare')
+```
+
+Fare 역시 확연한 패턴이 보인다. 
+
+약 50달러 이하의 요금을 지불한 탑승객의 생존률이 낮다.
+
+###Pclass,Embarked
+
+```{r mosaicPclassEmbarked, message=FALSE}
+pPclass<-ggplot(dat[1:891,])+
+  geom_mosaic(aes(x=product(Pclass),fill=Survived))+
+  labs(x='Pclass',y='Survived',title ='Pclass for Survived') 
+pEmbarked<-ggplot(dat[1:891,])+
+  geom_mosaic(aes(x=product(Embarked),fill=Survived))+
+  labs(x='Embarked',y='Survived',title ='Embarked for Survived') 
+grid.arrange(pPclass,pEmbarked,nrow=1)
+```
+
+모자이크 플롯으로 확인한 결과 Pclass 는 1, Embarked 는 C 인 탑승자의 생존률이 높았다. 
+
+#Feature Engineering
+
+지금까지 탐색적 데이터분석을 통해 각 독립변수와 생존률 사이의 관계를 알아봤다. 
+
+이에 따른 소결론은 다음과 같다.
+
++ 1 Age, Sex : 전체적으로 여성의 생존률이 남성보다 더 높다. 남성은 **14세미만(어린이)**를 제외하면 생존률이 매우 낮았다. **Child** 변수를 새로 정의하면 예측성능을 올릴 수 있을 것이라 예상한다. 
+
++ 2 FARE : 약 50달러 이상의 요금을 지불한 사람의 생존률이 높다. 
+
++ 3 Pclass : Pclass 가 1,2,3 인 승객 순으로 생존률이 높다.
+
++ 4 Embarked : C,Q,S 순으로 생존률이 높다.
+
+*추가로 알아봐야 할 변수*
+
++ 5 Sibsp,Parch : 동승한 가족 수도 연관이 있을 수 있다. Name 변수의 성을 참조해 Family 변수를 추가하도록 한다.
+
++ 6 Name : 이름에 따른 생존률도 탐색해본다.
+
++ 6 PassengerID : 크게 상관이 없는 것으로 보인다.
+
+##Child 변수 추가
+
+0~14세 사이의 승객은 Child, 그렇지 않은 승객은 Adult 로 지정한다.
+
+```{r child, message = FALSE}
+dat$Child[dat$Age<15]<-'Child'
+dat$Child[dat$Age>=15]<-'Adult'
+dat$Child<-as.factor(dat$Child)
+```
+
+##Name 분석
+
+이름은 [FamilyName], [Title].[GivenName] [MiddleName] 으로 구성됐다. 
+
+승객에 따라 MiddleName 이 없는경우도 있다. Family 변수를 추가하기 위해 Family Name 을 추출해본다. 
+
+추가로, Title 에 따른 생존률도 알아본다.
+
+정규 표현식을 활용해 FamilyName 과 Title 을 추출한다.
+
+```{r Name, message = FALSE}
+dat$FamilyName<-str_match(dat$Name,'(\\w*)[,]')[,2]
+dat$TitleName<-str_match(dat$Name,'(\\w*)[.]')[,2]
+sort(table(dat$TitleName))
+```
+
+Capt, Countess, Jonkheer, Sir, Major, Col, Dr, Rev 는 수가 적으므로 Others 로 묶는다. 
+
+Mlle, Ms 는 의미상 Miss 로, Dona, Lady, Mme 는 Mrs로 Don은 Mr 로 정리한다.
+
+```{r titleRename}
+dat$TitleName[dat$TitleName %in% c('Capt','Countess','Jonkheer','Sir','Major','Col','Dr','Rev')] <-'Others'
+dat$TitleName[dat$TitleName %in% c('Mlle','Ms')]<-'Miss'
+dat$TitleName[dat$TitleName %in% c('Dona','Lady','Mme')]<-'Mrs'
+dat$TitleName[dat$TitleName %in% c('Don')]<-'Mr'
+sort(table(dat$TitleName))
+```
+
+이제 Title 에 따른 생존률을 살펴보자.
+
+```{r titleMosaic,message = FALSE}
+
+ggplot(dat[1:891,])+
+  geom_mosaic(aes(x=product(TitleName),fill=Survived))+
+  labs(x='Title',y='Survived',title ='TitleName for Survived') 
+
+```
+
+Mrs, Miss, Master 에 비해 Mr 의 생존률이 낮은 것을 알 수 있다.
+
+##Family Size, Family 변수 추가(Sibsp,Parch)
+
+가족의수는 **Sibsp(동승한 형제 자매 수)+Parch(동승한 부모, 아내 수)+1(본인)** 로 계산한다. FamilySize에 따른 생존률도 살펴보자.
+
+```{r FamilySize}
+dat$FamilySize<-dat$SibSp+dat$Parch+1
+ggplot(dat[1:891,],aes(x=FamilySize,fill=Survived))+
+  geom_histogram(binwidth = 1,
+                 color = 'black')
+```
+
+2인에서 4인 가족의 생존률이 높은 것으로 보이는 반면, 혼자 탑승한 승객과 5인가족 이상을 대동한 승객의 생존률은 낮았다.
+
+#예측
+
+#결론
+
+
